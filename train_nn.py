@@ -120,8 +120,8 @@ def make_windows(df, feat_cols, W=10, step=1):
 
 def build_model(W, F):
     inp = keras.Input(shape=(W, F), name="seq")
-    x = layers.GRU(64, return_sequences=True)(inp)
-    x = layers.GRU(64)(x)
+    x = layers.LSTM(64, return_sequences=True, unroll=True)(inp)
+    x = layers.LSTM(64, unroll=True)(x)
     x = layers.Dense(64, activation="relu")(x)
     t = layers.Dense(3, activation="softmax", name="tracks")(x)
     v = layers.Dense(3, activation="softmax", name="volume")(x)
@@ -138,20 +138,45 @@ def build_model(W, F):
     return model
 
 def export_tflite(model, out_path, rep_data=None):
-    conv = tf.lite.TFLiteConverter.from_keras_model(model)
-    if rep_data is None:
+    import tensorflow as tf, tempfile, sys
+
+    def _configure(conv, use_int8):
+        conv.target_spec.supported_ops = [
+            tf.lite.OpsSet.TFLITE_BUILTINS,
+            tf.lite.OpsSet.SELECT_TF_OPS,
+        ]
+        conv._experimental_lower_tensor_list_ops = False
+        try:
+            conv.experimental_enable_resource_variables = True
+        except Exception:
+            pass
+        try:
+            conv.experimental_new_converter = True
+        except Exception:
+            pass
+        if use_int8:
+            conv.optimizations = [tf.lite.Optimize.DEFAULT]
+            conv.representative_dataset = rep_data
+        return conv
+
+    # Always convert via SavedModel to avoid Keras private API differences
+    with tempfile.TemporaryDirectory() as tmp:
+        # Keras 3 exports SavedModel via model.export(); fall back for older Keras
+        try:
+            export_fn = getattr(model, "export", None)
+            if callable(export_fn):
+                export_fn(tmp)
+            else:
+                model.save(tmp, include_optimizer=False)
+        except Exception:
+            model.save(tmp, include_optimizer=False)
+        conv = tf.lite.TFLiteConverter.from_saved_model(tmp)
+        conv = _configure(conv, rep_data is not None)
         tfl = conv.convert()
-        open(out_path, "wb").write(tfl)
-        return out_path
-    # INT8 optional
-    conv.optimizations = [tf.lite.Optimize.DEFAULT]
-    conv.representative_dataset = rep_data
-    conv.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    conv.inference_input_type = tf.int8
-    conv.inference_output_type = tf.int8
-    tfl = conv.convert()
+
     open(out_path, "wb").write(tfl)
     return out_path
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

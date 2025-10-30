@@ -12,7 +12,9 @@ I also tried hardcoding the gestures and it really didn't work well. Lots of fal
 ML is wayyyy better
 In the future we could add self correction or feedback so you can teach it your own gestures, but that's out of scope for now
 Daniel Liang signing out ✌️
+"""
 
+"""
 ------ Gestures ------
 Track control (index finger down):
   Next track:      poing thumb right, palm closed
@@ -26,9 +28,10 @@ Play / Pause (either mode):
 Run real-time inference with either XGBoost, TFLite, or both (shadow).
 
 Usage:
-  python run_inference.py --models models --backend tflite
+  python run_inference.py --models models --backend tflite [--headless]
 Options:
   --backend {xgb,tflite,shadow}
+  --headless   Run without GUI window (useful on Raspberry Pi)
 """
 
 import cv2, time, math, json, argparse, os, threading, queue, sys, subprocess
@@ -52,46 +55,55 @@ class CommandWorker(threading.Thread):
 
 worker = CommandWorker(); worker.start()
 
-def osa(script):
-    subprocess.run(["osascript","-e",script], check=False, capture_output=True)
+# ---------------- Linux/BlueZ media controls (replaces macOS AppleScript) ----------------
+def _btctl(cmds):
+    """
+    Send a small sequence of commands to bluetoothctl. Example cmds:
+      ["menu player", "play-pause", "back"]
+    Requires an active phone connection with a MediaPlayer.
+    """
+    try:
+        subprocess.run(
+            ["bluetoothctl"],
+            input=("\n".join(cmds) + "\n").encode(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False
+        )
+    except Exception as e:
+        print("[bluetoothctl]", e, file=sys.stderr)
 
-def _osa_next():
-    osa('''
-    if application "Spotify" is running then
-        tell application "Spotify" to next track
-    else if application "Music" is running then
-        tell application "Music" to next track
-    end if
-    ''')
+def _bt_playpause(): _btctl(["menu player", "play-pause", "back"])
+def _bt_next():      _btctl(["menu player", "next", "back"])
+def _bt_prev():      _btctl(["menu player", "previous", "back"])
+def _bt_vol_up():    _btctl(["menu player", "volumeup", "back"])
+def _bt_vol_down():  _btctl(["menu player", "volumedown", "back"])
 
-def _osa_prev():
-    osa('''
-    if application "Spotify" is running then
-        tell application "Spotify" to previous track
-    else if application "Music" is running then
-        tell application "Music" to previous track
-    end if
-    ''')
+def _alsa_nudge(db_delta):
+    """
+    Local volume change if AVRCP absolute volume is unsupported.
+    Adjust 'Master' to your mixer name if needed (e.g., 'PCM' or specific sink).
+    """
+    try:
+        subprocess.run(["amixer", "set", "Master", f"{int(db_delta)}dB"], check=False)
+    except Exception as e:
+        print("[amixer]", e, file=sys.stderr)
 
-def _osa_nudge(delta):
-    osa(f'''
-    set cur to output volume of (get volume settings)
-    set volume output volume (cur + {int(delta)})
-    ''')
+def async_next_track():        worker.submit(_bt_next)
+def async_prev_track():        worker.submit(_bt_prev)
+def async_toggle_play_pause(): worker.submit(_bt_playpause)
 
-def _osa_toggle_playpause():
-    osa('''
-    if application "Spotify" is running then
-        tell application "Spotify" to playpause
-    else if application "Music" is running then
-        tell application "Music" to playpause
-    end if
-    ''')
-
-def async_next_track(): worker.submit(_osa_next)
-def async_prev_track(): worker.submit(_osa_prev)
-def async_nudge_vol(delta): worker.submit(_osa_nudge, delta)
-def async_toggle_play_pause(): worker.submit(_osa_toggle_playpause)
+def async_nudge_vol(delta):
+    """
+    Keep the original API (delta in arbitrary units). We map to AVRCP
+    up/down steps; uncomment ALSA fallback if phone volume doesn’t move.
+    """
+    if delta > 0:
+        worker.submit(_bt_vol_up)
+        # worker.submit(_alsa_nudge, +2)   # optional fallback
+    else:
+        worker.submit(_bt_vol_down)
+        # worker.submit(_alsa_nudge, -2)   # optional fallback
 
 # ---------------- MediaPipe & features (match training) ----------------
 SEL = [0,1,2,3,4,5,9,13,17,6,8,10,12,14,16,18,20]
@@ -242,6 +254,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", default="models")
     ap.add_argument("--backend", choices=["xgb","tflite","shadow"], default="tflite")
+    ap.add_argument("--headless", action="store_true", help="Run without GUI window (Pi-friendly)")
     args = ap.parse_args()
 
     # Load meta for window size (works for both backends; fallback for XGB)
@@ -262,10 +275,17 @@ if __name__ == "__main__":
         tfl = TFLiteBackend(args.models)
         W_meta = tfl.W
 
-    # Camera + buffers
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
+    # Camera + buffers (Pi-friendly: try libcamera via GStreamer, then fallback to /dev/video0)
+    GST = (
+        "libcamerasrc ! video/x-raw,width=640,height=360,framerate=30/1 "
+        "! videoconvert ! appsink drop=true sync=false"
+    )
+    cap = cv2.VideoCapture(GST, cv2.CAP_GSTREAMER)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
 
     prev_state=None
     win = WinBuf(W_meta or 10)
@@ -294,8 +314,9 @@ if __name__ == "__main__":
             if res.multi_hand_landmarks:
                 hand = res.multi_hand_landmarks[0]
                 handed = res.multi_handedness[0].classification[0].label
-                mp_draw.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS,
-                    mp_style.get_default_hand_landmarks_style(), mp_style.get_default_hand_connections_style())
+                if not args.headless:
+                    mp_draw.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS,
+                        mp_style.get_default_hand_landmarks_style(), mp_style.get_default_hand_connections_style())
                 feat, prev_state, C = extract_features(hand.landmark, handed, prev_state)
                 win.add(feat)
 
@@ -321,7 +342,6 @@ if __name__ == "__main__":
                     else:  # shadow: prefer TFLite for actions, log disagreements
                         p_tr, p_vl, p_pp = p_tr_t, p_vl_t, p_pp_t
                         try:
-                            # simple disagreement log
                             if (np.argmax(p_tr_t) != np.argmax(p_tr_x)) or (np.argmax(p_vl_t) != np.argmax(p_vl_x)):
                                 print(f"[shadow] tracks tfl={np.argmax(p_tr_t)} xgb={np.argmax(p_tr_x)} | "
                                       f"vol tfl={np.argmax(p_vl_t)} xgb={np.argmax(p_vl_x)}")
@@ -354,22 +374,29 @@ if __name__ == "__main__":
                                 async_prev_track(); info = '⏮️ Previous'; cooldown_track = now + 0.35; hold_next=hold_prev=0
 
                 mode = 'VOLUME (index up)' if index_up else 'TRACKS (index down)'
-                cv2.putText(frame, mode, (10,24), 0, 0.7, (255,255,255), 2)
+                if not args.headless:
+                    cv2.putText(frame, mode, (10,24), 0, 0.7, (255,255,255), 2)
             else:
                 prev_state=None; win = WinBuf(W_meta or 10)
 
             # Overlay debug: show play/pause probability if available
             try:
-                if tfl:
+                if tfl and (not args.headless):
                     cv2.putText(frame, f"PP: {p_pp_t:.2f}", (10, 76), 0, 0.6, (0,200,255), 2)
             except Exception:
                 pass
 
-            if info:
-                cv2.putText(frame, info, (10, 50), 0, 0.8, (0,255,0), 2)
-            cv2.putText(frame, "q = quit", (10, h-12), 0, 0.6, (200,200,200), 2)
+            if not args.headless:
+                if info:
+                    cv2.putText(frame, info, (10, 50), 0, 0.8, (0,255,0), 2)
+                cv2.putText(frame, "q = quit", (10, h-12), 0, 0.6, (200,200,200), 2)
 
-            cv2.imshow('Gesture — Inference (XGB/TFLite)', frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+                cv2.imshow('Gesture — Inference (XGB/TFLite)', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'): break
+            else:
+                # tiny sleep to keep CPU sane when headless
+                time.sleep(0.001)
 
-    cap.release(); cv2.destroyAllWindows()
+    cap.release()
+    if not args.headless:
+        cv2.destroyAllWindows()

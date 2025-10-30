@@ -1,12 +1,8 @@
-# Step 1 of 3 Record and label hand gesture data
-# Example usage: python record_and_label.py --out data/session1.csv
-# Just install the right libraries and ur good lol they all in the imports i forgot the names
-# good luck to whoever reads this (hi meiling)
-# Daniel Liang signing out ✌️
-
 import cv2, time, math, csv, argparse, os
 import numpy as np
 import mediapipe as mp
+
+# --- pynput has been removed as it conflicts with the OpenCV event loop on macOS ---
 
 SEL = [0,1,2,3,4,5,9,13,17,6,8,10,12,14,16,18,20]
 
@@ -75,16 +71,19 @@ def extract_features(lm, handed_label, prev_state):
     state = {'idx': C[8].copy(), 'td': thumb_dir.copy()}
     return feat, state, C
 
-LABELS = {
-    ord('0'): ('NONE', 0),
-    ord('1'): ('NEXT', 1),
-    ord('2'): ('PREV', 2),
-    ord('3'): ('VOL_UP', 3),
-    ord('4'): ('VOL_DOWN', 4),
-    ord('5'): ('PLAY_PAUSE', 5),  # NEW
+# Labels map (char -> (name, id))
+LABELS_CHAR = {
+    '0': ('NONE', 0),
+    '1': ('NEXT', 1),
+    '2': ('PREV', 2),
+    '3': ('VOL_UP', 3),
+    '4': ('VOL_DOWN', 4),
+    '5': ('PLAY_PAUSE', 5),
 }
+INSTR = "Press: 1 NEXT | 2 PREV | 3 VOL_UP | 4 VOL_DOWN | 5 PLAY/PAUSE | 0 NONE | q save+quit"
 
-INSTR = "0 NONE | 1 NEXT | 2 PREV | 3 VOL_UP | 4 VOL_DOWN | 5 PLAY/PAUSE | q save+quit"
+# --- State for current label is now managed directly in the main loop ---
+# --- All pynput related code (_pressed, _pressed_lock, _on_press, _on_release, _current_label) has been removed ---
 
 def record(out_csv):
     os.makedirs(os.path.dirname(out_csv) or '.', exist_ok=True)
@@ -93,9 +92,12 @@ def record(out_csv):
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
     trail = KnobTrail(24)
     prev_state=None
-    current_label=('NONE',0)
+    
+    # --- New: state variable for the current label ---
+    current_label_name = 'NONE'
+    current_label_id = 0
 
-    # --- open for append; write header only if new/empty ---
+    # open for append; header only if new/empty
     new_file = not os.path.exists(out_csv) or os.path.getsize(out_csv) == 0
     f = open(out_csv, 'a', newline='')
     writer = csv.writer(f)
@@ -105,9 +107,15 @@ def record(out_csv):
     session = os.path.splitext(os.path.basename(out_csv))[0]
     t0 = time.time()
 
+    # --- keyboard listener has been removed ---
+
+    # compatibility alias
+    mp_hands.HANDS = mp_hands.Hands
+
     with mp_hands.HANDS(static_image_mode=False,max_num_hands=1,model_complexity=0,
                         min_detection_confidence=0.5,min_tracking_confidence=0.5) as hands:
         while True:
+            # --- quit flag is no longer needed, we check for 'q' from cv2.waitKey ---
             ok, frame = cap.read()
             if not ok: break
             h,w = frame.shape[:2]
@@ -131,20 +139,35 @@ def record(out_csv):
             else:
                 prev_state=None; trail.reset(); row_feat = []
 
-            writer.writerow([session, f"{t:.3f}", current_label[0], current_label[1], has_hand, f"{twirl_ddeg:.3f}"] + row_feat)
+            # The key press handling is now done via cv2.waitKey below
+            writer.writerow([session, f"{t:.3f}", current_label_name, current_label_id, has_hand, f"{twirl_ddeg:.3f}"] + row_feat)
 
             # HUD
             cv2.putText(frame, f"Recording: {session}", (10,24), 0, 0.7, (255,255,255), 2)
             cv2.putText(frame, INSTR, (10,50), 0, 0.6, (255,255,255), 2)
-            cv2.putText(frame, f"Current label: {current_label[0]}", (10,76), 0, 0.7, (0,255,0), 2)
-            cv2.imshow('Record & Label (bone features)', frame)
+            cv2.putText(frame, f"Current label (press key): {current_label_name}", (10,76), 0, 0.7, (0,255,0), 2)
+            cv2.putText(frame, "Press q to save+quit", (10,102), 0, 0.6, (200,200,200), 2)
+            cv2.imshow('Record & Label (press-to-label)', frame)
 
+            # Use cv2.waitKey to handle all key presses
             k = cv2.waitKey(1) & 0xFF
             if k == ord('q'):
                 break
-            if k in LABELS:
-                current_label = LABELS[k]
+            
+            key_char = chr(k) if k != 255 else None # 255 is returned when no key is pressed
+            if key_char and key_char in LABELS_CHAR:
+                new_name, new_id = LABELS_CHAR[key_char]
+                if new_id == current_label_id:
+                    # Toggle off if pressing the same key again
+                    current_label_name = 'NONE'
+                    current_label_id = 0
+                else:
+                    # Set the new label
+                    current_label_name = new_name
+                    current_label_id = new_id
 
+
+    # cleanup
     f.close()
     cap.release(); cv2.destroyAllWindows()
     print(f"Appended to: {out_csv}")
@@ -153,8 +176,4 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--out', required=True, help='output CSV path, e.g., data/session1.csv')
     args = parser.parse_args()
-    # Fix for mp_hands.HANDS typo due to caps:
-    mp_hands.HANDS = mp_hands.Hands
     record(args.out)
-
-# another amazing daniel liang production 🚀🚀🚀

@@ -1,0 +1,12 @@
+# Ignore data directory
+data/
+
+# Ignore models directory
+models/
+
+# Ignore TensorFlow virtual environment
+tfenv/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
