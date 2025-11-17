@@ -202,16 +202,28 @@ if __name__ == "__main__":
     xgb = XGBBackend(args.models, window=W_meta)
 
     # Camera + buffers (Pi-friendly: try libcamera via GStreamer, then fallback to /dev/video0)
+    print("[INFO] Attempting to open camera with GStreamer (for libcamera)...")
     GST = (
         "libcamerasrc ! video/x-raw,width=640,height=360,framerate=30/1 "
         "! videoconvert ! appsink drop=true sync=false"
     )
     cap = cv2.VideoCapture(GST, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
+        print("[WARN] GStreamer failed. Falling back to default camera index 0...")
         cap = cv2.VideoCapture(0)
         if cap.isOpened():
+            print("[INFO] Successfully opened camera at index 0.")
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+
+    if not cap.isOpened():
+        print("\n[ERROR] Could not open any camera. Please check your configuration.")
+        print("    1. Is the camera enabled? Run 'sudo raspi-config' -> Interface Options -> CSI Camera -> Enable.")
+        print("    2. Is the camera detected? Run 'libcamera-hello --list-cameras' in your terminal.")
+        print("    3. Is the ribbon cable connected correctly at both ends?")
+        exit()
+
+    print("[INFO] Camera opened successfully. Starting gesture detection...")
 
     prev_state=None
     win = WinBuf(W_meta or 10)
