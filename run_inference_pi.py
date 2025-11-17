@@ -1,23 +1,13 @@
 """
-Step 3 of 3 Run gesture recognition inference
-Example usage: python run_inference.py --models models
-This works for macOS only since it uses apple script to control Music/Spotify only
-It's multithreaded so it doesn't mess with inference bc idk why but subprocess calls can be slow and freeze the UI
-prolly hard coded limitation from apple script or something
-I tested this on macOS 26 and Apple M1 Max. My system was taking up 35 watts during inference with webcam
-But that was running at 960x540 and also running spotify and streaming at the same time we could optimize it fs
-I'm praying this runs on a Raspberry Pi but idk if inference will do well on rasp
-I hope it runs tho 🙏🙏🙏🙏
-I also tried hardcoding the gestures and it really didn't work well. Lots of false positives.
-ML is wayyyy better
-In the future we could add self correction or feedback so you can teach it your own gestures, but that's out of scope for now
-Daniel Liang signing out ✌️
-"""
+Step 3 of 3 Run gesture recognition inference (Raspberry Pi - XGBoost only)
+Example usage: python run_inference_pi.py --models models [--headless]
 
-"""
+This version is optimized for Raspberry Pi running Python 3.11 with XGBoost only (no TensorFlow).
+It uses Linux/BlueZ media controls for Bluetooth audio devices.
+
 ------ Gestures ------
 Track control (index finger down):
-  Next track:      poing thumb right, palm closed
+  Next track:      point thumb right, palm closed
   Previous track:  point thumb left, palm closed
 Volume control (index finger up):
   Volume up:       twirl index fingers clockwise
@@ -25,12 +15,9 @@ Volume control (index finger up):
 Play / Pause (either mode):
   Shakaaaaaa 🤙🤙🤙
 
-Run real-time inference with either XGBoost, TFLite, or both (shadow).
-
 Usage:
-  python run_inference.py --models models --backend tflite [--headless]
+  python run_inference_pi.py --models models [--headless]
 Options:
-  --backend {xgb,tflite,shadow}
   --headless   Run without GUI window (useful on Raspberry Pi)
 """
 
@@ -193,87 +180,26 @@ class XGBBackend:
             p_pp = self.play.predict_proba(x)[0][1]  # scalar prob
         return p_tr, p_vl, p_pp
 
-# --------- TFLite backend (new) ----------
-class TFLiteBackend:
-    def __init__(self, models_dir):
-        import tensorflow as tf  # only needed for interpreter
-        meta_path = os.path.join(models_dir, "meta.json")
-        with open(meta_path) as f: meta = json.load(f)
-        self.W = int(meta["window"])
-        self.F = int(meta["feat_dim"])
-        self.mu = np.asarray(meta["norm_mean"], dtype=np.float32)
-        self.sd = np.asarray(meta["norm_std"], dtype=np.float32)
-        self.interp = tf.lite.Interpreter(model_path=os.path.join(models_dir, "gesture_small_fp32.tflite"))
-        self.interp.allocate_tensors()
-        sigs = self.interp.get_signature_list()
-        # Use default signature
-        self.run = self.interp.get_signature_runner(list(sigs.keys())[0])
-
-        # Cache input/output names from the signature
-        input_details = self.run.get_input_details()
-        output_details = self.run.get_output_details()
-        self.input_name = list(input_details.keys())[0]
-
-        # Prefer semantic names if present; fall back to shape-based mapping
-        names = set(output_details.keys())
-        out_map = {}
-        if {'tracks','volume','playpause'}.issubset(names):
-            out_map['tracks'] = 'tracks'
-            out_map['volume'] = 'volume'
-            out_map['playpause'] = 'playpause'
-        else:
-            for name, detail in output_details.items():
-                try:
-                    last = int(detail['shape'][-1])
-                except Exception:
-                    last = None
-                if last == 3:
-                    if 'tracks' not in out_map: out_map['tracks'] = name
-                    elif 'volume' not in out_map: out_map['volume'] = name
-                elif last == 1:
-                    out_map['playpause'] = name
-        if len(out_map) < 3:
-            raise RuntimeError(f"Couldn't map all TFLite output heads. Found: {list(output_details.keys())}")
-        self.out_map = out_map
-
-    def predict(self, win_arr):
-        # win_arr: [W, F_raw]. If your per-frame vector > F, slice first F.
-        X = win_arr[:, :self.F].astype(np.float32)
-        X = (X - self.mu) / self.sd
-        Xb = X[None, ...]  # [1,W,F]
-        outs = self.run(**{self.input_name: Xb})
-        
-        # In train_nn.py, outputs are named 'tracks', 'volume', 'playpause'
-        p_tr = outs[self.out_map['tracks']][0]
-        p_vl = outs[self.out_map['volume']][0]
-        p_pp = float(outs[self.out_map['playpause']][0][0])
-        return p_tr, p_vl, p_pp
-
 # ---------------- Main loop ----------------
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", default="models")
-    ap.add_argument("--backend", choices=["xgb","tflite","shadow"], default="tflite")
     ap.add_argument("--headless", action="store_true", help="Run without GUI window (Pi-friendly)")
     args = ap.parse_args()
 
-    # Load meta for window size (works for both backends; fallback for XGB)
+    # Load meta for window size
     W_meta = None
     meta_path = os.path.join(args.models, "meta.json")
     if os.path.exists(meta_path):
         with open(meta_path) as f: W_meta = json.load(f).get("window")
+    
+    # If no meta, default to 10 (XGBoost training default)
+    if W_meta is None:
+        W_meta = 10
+        print(f"[WARNING] No meta.json found, using default window size: {W_meta}")
 
-    # Backends
-    xgb = None; tfl = None
-    if args.backend in ("xgb","shadow"):
-        # If no meta, read W from feat_schema.json (XGB trainer)
-        if W_meta is None:
-            with open(os.path.join(args.models,"feat_schema.json")) as f:
-                W_meta = json.load(f)["window"]
-        xgb = XGBBackend(args.models, window=W_meta)
-    if args.backend in ("tflite","shadow"):
-        tfl = TFLiteBackend(args.models)
-        W_meta = tfl.W
+    # Load XGBoost backend only
+    xgb = XGBBackend(args.models, window=W_meta)
 
     # Camera + buffers (Pi-friendly: try libcamera via GStreamer, then fallback to /dev/video0)
     GST = (
@@ -328,25 +254,10 @@ if __name__ == "__main__":
                 if win.ready():
                     win_arr = win.stack()  # [W, Fraw]
 
-                    # Backend predictions
-                    p_tr_t, p_vl_t, p_pp_t = (None, None, None)
-                    if tfl:   p_tr_t, p_vl_t, p_pp_t = tfl.predict(win_arr)
-                    if xgb:
-                        p_tr_x, p_vl_x, p_pp_x = xgb.predict(win_arr)
-
-                    # Choose per backend
-                    if args.backend == "xgb":
-                        p_tr, p_vl, p_pp = p_tr_x, p_vl_x, (p_pp_x if xgb.play is not None else None)
-                    elif args.backend == "tflite":
-                        p_tr, p_vl, p_pp = p_tr_t, p_vl_t, p_pp_t
-                    else:  # shadow: prefer TFLite for actions, log disagreements
-                        p_tr, p_vl, p_pp = p_tr_t, p_vl_t, p_pp_t
-                        try:
-                            if (np.argmax(p_tr_t) != np.argmax(p_tr_x)) or (np.argmax(p_vl_t) != np.argmax(p_vl_x)):
-                                print(f"[shadow] tracks tfl={np.argmax(p_tr_t)} xgb={np.argmax(p_tr_x)} | "
-                                      f"vol tfl={np.argmax(p_vl_t)} xgb={np.argmax(p_vl_x)}")
-                        except Exception:
-                            pass
+                    # XGBoost predictions only
+                    p_tr, p_vl, p_pp = xgb.predict(win_arr)
+                    if xgb.play is None:
+                        p_pp = None
 
                     # --- Play/Pause (shaka) first ---
                     if p_pp is not None:
@@ -381,8 +292,8 @@ if __name__ == "__main__":
 
             # Overlay debug: show play/pause probability if available
             try:
-                if tfl and (not args.headless):
-                    cv2.putText(frame, f"PP: {p_pp_t:.2f}", (10, 76), 0, 0.6, (0,200,255), 2)
+                if p_pp is not None and (not args.headless):
+                    cv2.putText(frame, f"PP: {p_pp:.2f}", (10, 76), 0, 0.6, (0,200,255), 2)
             except Exception:
                 pass
 
@@ -391,7 +302,7 @@ if __name__ == "__main__":
                     cv2.putText(frame, info, (10, 50), 0, 0.8, (0,255,0), 2)
                 cv2.putText(frame, "q = quit", (10, h-12), 0, 0.6, (200,200,200), 2)
 
-                cv2.imshow('Gesture — Inference (XGB/TFLite)', frame)
+                cv2.imshow('Gesture — Inference (XGBoost)', frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'): break
             else:
                 # tiny sleep to keep CPU sane when headless

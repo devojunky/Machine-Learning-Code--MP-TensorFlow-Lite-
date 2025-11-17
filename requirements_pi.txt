@@ -1,4 +1,4 @@
-# --- Core scientific + vision stack ---
+# --- Core scientific + vision stack (Python 3.11 compatible) ---
 numpy==1.26.4
 opencv-python==4.11.0.86
 mediapipe==0.10.21
@@ -6,9 +6,8 @@ joblib==1.5.2
 scikit-learn==1.7.2
 scipy==1.16.2
 
-# --- Inference backend (TFLite or XGB) ---
+# --- Inference backend (XGBoost only, no TensorFlow) ---
 xgboost==3.1.1
-tflite-runtime==2.14.0
 
 # --- Visualization / utils ---
 matplotlib==3.10.7
