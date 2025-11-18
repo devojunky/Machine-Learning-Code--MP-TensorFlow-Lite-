@@ -121,6 +121,7 @@ def record(out_csv):
             h,w = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             res = hands.process(rgb)
+            frame = cv2.flip(frame, 1)
             t = time.time() - t0
             has_hand = 0
             twirl_ddeg=0.0
