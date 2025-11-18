@@ -52,6 +52,10 @@ class PiCamera2Capture:
             return False, None
         # Convert RGB frame from Picamera2 to BGR for OpenCV
         frame = self.picam2.capture_array()
+        # Verify frame dimensions
+        if frame.shape[:2] != (self.H, self.W):
+            # Resize if dimensions don't match expected size
+            frame = cv2.resize(frame, (self.W, self.H))
         return True, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
     def release(self):
@@ -257,6 +261,13 @@ if __name__ == "__main__":
         exit()
 
     print("[INFO] Camera opened successfully. Starting gesture detection...")
+    
+    # Initialize OpenCV window with explicit size (prevents weird zoom/resize on Pi)
+    if not args.headless:
+        cv2.namedWindow('Gesture — Inference (XGBoost)', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Gesture — Inference (XGBoost)', 640, 360)
+        # Disable window resize to prevent weird controls
+        cv2.setWindowProperty('Gesture — Inference (XGBoost)', cv2.WND_PROP_ASPECT_RATIO, cv2.WINDOW_KEEPRATIO)
 
     prev_state=None
     win = WinBuf(W_meta or 10)
@@ -264,6 +275,12 @@ if __name__ == "__main__":
     hold_next = hold_prev = 0
     hold_pp = 0
     LOCK_AFTER_PAUSE = 0.4
+    
+    # Inference status tracking
+    frame_count = 0
+    hand_detected_count = 0
+    inference_count = 0
+    last_status_print = time.time()
 
     # Palm-gated index_up (prevents back-of-hand false volume)
     NZ_THRESH = 0.02
@@ -276,13 +293,31 @@ if __name__ == "__main__":
         while True:
             ok, frame = cap.read()
             if not ok: break
-            h,w = frame.shape[:2]
+            frame_count += 1
+            
+            # Verify frame dimensions on first frame
+            if frame_count == 1:
+                h, w = frame.shape[:2]
+                print(f"[INFO] Frame dimensions: {w}x{h}")
+                if w < 100 or h < 100:
+                    print(f"[ERROR] Frame size is suspiciously small: {w}x{h}")
+                    print("[ERROR] This may indicate a camera configuration issue.")
+            
+            h, w = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             res = hands.process(rgb)
             now = time.time()
             info = ""
+            
+            # Initialize prediction variables for display
+            p_tr = None
+            p_vl = None
+            p_pp = None
+            index_up = False
+            handed = None
 
             if res.multi_hand_landmarks:
+                hand_detected_count += 1
                 hand = res.multi_hand_landmarks[0]
                 handed = res.multi_handedness[0].classification[0].label
                 if not args.headless:
@@ -298,11 +333,23 @@ if __name__ == "__main__":
 
                 if win.ready():
                     win_arr = win.stack()  # [W, Fraw]
+                    inference_count += 1
 
                     # XGBoost predictions only
                     p_tr, p_vl, p_pp = xgb.predict(win_arr)
                     if xgb.play is None:
                         p_pp = None
+                    
+                    # Periodic status logging (every 5 seconds)
+                    if now - last_status_print > 5.0:
+                        print(f"[STATUS] Frames: {frame_count}, Hands detected: {hand_detected_count}, Inferences: {inference_count}")
+                        if p_tr is not None:
+                            print(f"         Track probs: None={p_tr[0]:.2f}, Next={p_tr[1]:.2f}, Prev={p_tr[2]:.2f}")
+                        if p_vl is not None:
+                            print(f"         Volume probs: Down={p_vl[0]:.2f}, None={p_vl[1]:.2f}, Up={p_vl[2]:.2f}")
+                        if p_pp is not None:
+                            print(f"         Play/Pause prob: {p_pp:.2f}")
+                        last_status_print = now
 
                     # --- Play/Pause (shaka) first ---
                     if p_pp is not None:
@@ -329,22 +376,52 @@ if __name__ == "__main__":
                             elif hold_prev >= 3:
                                 async_prev_track(); info = '⏮️ Previous'; cooldown_track = now + 0.35; hold_next=hold_prev=0
 
-                mode = 'VOLUME (index up)' if index_up else 'TRACKS (index down)'
-                if not args.headless:
-                    cv2.putText(frame, mode, (10,24), 0, 0.7, (255,255,255), 2)
             else:
                 prev_state=None; win = WinBuf(W_meta or 10)
 
-            # Overlay debug: show play/pause probability if available
-            try:
-                if p_pp is not None and (not args.headless):
-                    cv2.putText(frame, f"PP: {p_pp:.2f}", (10, 76), 0, 0.6, (0,200,255), 2)
-            except Exception:
-                pass
-
+            # Overlay inference status and probabilities
             if not args.headless:
+                y_offset = 24
+                # Show hand detection status
+                if res.multi_hand_landmarks:
+                    cv2.putText(frame, f"Hand: {handed}", (10, y_offset), 0, 0.6, (0,255,0), 2)
+                    y_offset += 24
+                else:
+                    cv2.putText(frame, "No hand detected", (10, y_offset), 0, 0.6, (100,100,100), 2)
+                    y_offset += 24
+                
+                # Show window buffer status
+                if win.ready():
+                    cv2.putText(frame, f"Buffer: Ready ({len(win.buf)}/{win.W})", (10, y_offset), 0, 0.6, (0,255,255), 2)
+                else:
+                    cv2.putText(frame, f"Buffer: Filling ({len(win.buf)}/{win.W})", (10, y_offset), 0, 0.6, (200,200,0), 2)
+                y_offset += 24
+                
+                # Show prediction probabilities
+                if p_tr is not None:
+                    cv2.putText(frame, f"Tracks: N={p_tr[0]:.2f} Next={p_tr[1]:.2f} Prev={p_tr[2]:.2f}", 
+                               (10, y_offset), 0, 0.5, (255,255,255), 1)
+                    y_offset += 20
+                if p_vl is not None:
+                    cv2.putText(frame, f"Volume: D={p_vl[0]:.2f} N={p_vl[1]:.2f} U={p_vl[2]:.2f}", 
+                               (10, y_offset), 0, 0.5, (255,255,255), 1)
+                    y_offset += 20
+                if p_pp is not None:
+                    cv2.putText(frame, f"Play/Pause: {p_pp:.2f}", (10, y_offset), 0, 0.6, (0,200,255), 2)
+                    y_offset += 24
+                
+                # Show action info
                 if info:
-                    cv2.putText(frame, info, (10, 50), 0, 0.8, (0,255,0), 2)
+                    cv2.putText(frame, info, (10, y_offset), 0, 0.8, (0,255,0), 2)
+                    y_offset += 24
+                
+                # Show mode
+                if res.multi_hand_landmarks:
+                    mode = 'VOLUME (index up)' if index_up else 'TRACKS (index down)'
+                    cv2.putText(frame, mode, (10, y_offset), 0, 0.7, (255,255,255), 2)
+                
+                # Show frame info
+                cv2.putText(frame, f"Frame: {w}x{h}", (w-120, 20), 0, 0.5, (150,150,150), 1)
                 cv2.putText(frame, "q = quit", (10, h-12), 0, 0.6, (200,200,200), 2)
 
                 cv2.imshow('Gesture — Inference (XGBoost)', frame)
