@@ -16,9 +16,19 @@ Play / Pause (either mode):
   Shakaaaaaa 🤙🤙🤙
 
 Usage:
-  python run_inference_pi.py --models models [--headless]
+  python run_inference_pi.py --models models [--headless] [--enable-bt-receiver]
+  
+Bluetooth Audio Receiver Setup:
+  First time setup:
+    python run_inference_pi.py --setup-bt
+  
+  Run with Bluetooth receiver enabled:
+    python run_inference_pi.py --models models --enable-bt-receiver
+
 Options:
-  --headless   Run without GUI window (useful on Raspberry Pi)
+  --headless          Run without GUI window (useful on Raspberry Pi)
+  --setup-bt          Set up Bluetooth audio receiver (A2DP sink) and exit
+  --enable-bt-receiver  Enable Bluetooth receiver mode on startup (makes Pi discoverable)
 """
 
 import cv2, time, math, json, argparse, os, threading, queue, sys, subprocess
@@ -81,6 +91,121 @@ class CommandWorker(threading.Thread):
         except queue.Full: pass
 
 worker = CommandWorker(); worker.start()
+
+# ---------------- Bluetooth A2DP Sink Setup ----------------
+def setup_bluetooth_receiver():
+    """
+    Configure the Raspberry Pi to act as a Bluetooth audio receiver (A2DP sink).
+    This makes the Pi discoverable and ready to receive audio from phones/tablets.
+    """
+    print("[INFO] Setting up Bluetooth audio receiver...")
+    
+    # Check if PulseAudio is running
+    try:
+        result = subprocess.run(
+            ["pulseaudio", "--check"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False
+        )
+        if result.returncode != 0:
+            print("[WARN] PulseAudio is not running. Starting PulseAudio...")
+            subprocess.Popen(["pulseaudio", "--start"], 
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            time.sleep(2)
+    except Exception as e:
+        print(f"[WARN] Could not check PulseAudio: {e}")
+    
+    # Load PulseAudio Bluetooth module if not already loaded
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "modules", "short"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True
+        )
+        if "module-bluetooth" not in result.stdout:
+            print("[INFO] Loading PulseAudio Bluetooth module...")
+            subprocess.run(
+                ["pactl", "load-module", "module-bluetooth-discover"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False
+            )
+            time.sleep(1)
+        else:
+            print("[INFO] PulseAudio Bluetooth module already loaded.")
+    except Exception as e:
+        print(f"[WARN] Could not load PulseAudio Bluetooth module: {e}")
+        print("[WARN] You may need to install: sudo apt-get install pulseaudio-module-bluetooth")
+    
+    # Enable Bluetooth and make discoverable
+    try:
+        print("[INFO] Enabling Bluetooth and making device discoverable...")
+        _btctl(["power", "on"])
+        time.sleep(1)
+        _btctl(["discoverable", "on"])
+        time.sleep(1)
+        _btctl(["pairable", "on"])
+        
+        # Get device name and MAC address for user info
+        result = subprocess.run(
+            ["bluetoothctl", "show"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True
+        )
+        print("[INFO] Bluetooth receiver is now active and discoverable!")
+        print("[INFO] Look for this device on your phone/tablet to connect.")
+        for line in result.stdout.split('\n'):
+            if 'Name:' in line or 'Alias:' in line:
+                print(f"         {line.strip()}")
+            elif 'Address:' in line:
+                print(f"         {line.strip()}")
+    except Exception as e:
+        print(f"[WARN] Could not configure Bluetooth: {e}")
+        print("[WARN] Make sure Bluetooth is enabled: sudo systemctl enable bluetooth")
+        print("[WARN] And that you have permissions (may need to run with sudo or add user to bluetooth group)")
+
+def check_bluetooth_setup():
+    """Check if Bluetooth receiver setup is complete."""
+    try:
+        # Check if discoverable
+        result = subprocess.run(
+            ["bluetoothctl", "show"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True
+        )
+        discoverable = "Discoverable: yes" in result.stdout
+        powered = "Powered: yes" in result.stdout
+        
+        if not powered:
+            print("[WARN] Bluetooth is not powered on.")
+            return False
+        if not discoverable:
+            print("[WARN] Bluetooth is not discoverable.")
+            return False
+        
+        # Check PulseAudio Bluetooth module
+        result = subprocess.run(
+            ["pactl", "list", "modules", "short"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True
+        )
+        if "module-bluetooth" not in result.stdout:
+            print("[WARN] PulseAudio Bluetooth module not loaded.")
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"[WARN] Could not check Bluetooth setup: {e}")
+        return False
 
 # ---------------- Linux/BlueZ media controls (replaces macOS AppleScript) ----------------
 def _btctl(cmds):
@@ -225,7 +350,68 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", default="models")
     ap.add_argument("--headless", action="store_true", help="Run without GUI window (Pi-friendly)")
+    ap.add_argument("--setup-bt", action="store_true", 
+                   help="Set up Bluetooth audio receiver (A2DP sink) and exit")
+    ap.add_argument("--enable-bt-receiver", action="store_true",
+                   help="Enable Bluetooth receiver mode on startup (makes Pi discoverable)")
     args = ap.parse_args()
+    
+    # Handle Bluetooth setup mode
+    if args.setup_bt:
+        print("=" * 60)
+        print("Bluetooth Audio Receiver Setup")
+        print("=" * 60)
+        print("\nThis will configure your Raspberry Pi to act as a Bluetooth")
+        print("audio receiver. Audio will play through the system's default")
+        print("audio device (HDMI, 3.5mm jack, USB, etc.)\n")
+        
+        # Check for required packages
+        print("[INFO] Checking for required packages...")
+        required_packages = [
+            "pulseaudio",
+            "pulseaudio-module-bluetooth",
+            "bluez",
+            "bluez-tools"
+        ]
+        
+        missing = []
+        for pkg in required_packages:
+            # Check if package is installed using dpkg
+            result = subprocess.run(
+                ["dpkg", "-l", pkg],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False
+            )
+            if result.returncode != 0 or "ii" not in result.stdout.decode():
+                missing.append(pkg)
+        
+        if missing:
+            print(f"\n[WARN] Missing packages: {', '.join(missing)}")
+            print("Install them with:")
+            print(f"  sudo apt-get update")
+            print(f"  sudo apt-get install -y {' '.join(missing)}")
+            print("\nAfter installation, run this script again with --setup-bt")
+            sys.exit(1)
+        
+        print("[INFO] All required packages are installed.\n")
+        setup_bluetooth_receiver()
+        
+        print("\n" + "=" * 60)
+        print("Setup complete! Next steps:")
+        print("=" * 60)
+        print("1. On your phone/tablet, go to Bluetooth settings")
+        print("2. Look for your Raspberry Pi device name")
+        print("3. Pair and connect to it")
+        print("4. Start playing audio - it should come through the Pi's speakers!")
+        print("\nTo run gesture control with Bluetooth receiver enabled:")
+        print("  python run_inference_pi.py --models models --enable-bt-receiver")
+        print("\nNote: To make Bluetooth receiver persistent across reboots:")
+        print("  - The --enable-bt-receiver flag will auto-configure on each run")
+        print("  - Or add PulseAudio Bluetooth module to /etc/pulse/default.pa:")
+        print("    load-module module-bluetooth-discover")
+        print("=" * 60)
+        sys.exit(0)
 
     # Load meta for window size
     W_meta = None
@@ -261,6 +447,14 @@ if __name__ == "__main__":
         exit()
 
     print("[INFO] Camera opened successfully. Starting gesture detection...")
+    
+    # Set up Bluetooth receiver if requested
+    if args.enable_bt_receiver:
+        if not check_bluetooth_setup():
+            print("[INFO] Bluetooth receiver not fully configured. Running setup...")
+            setup_bluetooth_receiver()
+        else:
+            print("[INFO] Bluetooth receiver is already configured and discoverable.")
     
     # Initialize OpenCV window with explicit size (prevents weird zoom/resize on Pi)
     if not args.headless:

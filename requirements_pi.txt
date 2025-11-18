@@ -20,3 +20,19 @@ tqdm==4.67.1
 # Note: Requires system packages to be installed first on Pi OS:
 # sudo apt update && sudo apt install -y python3-picamera2 libcamera-dev
 picamera2==0.3.12
+
+# --- Bluetooth Audio Receiver (A2DP Sink) ---
+# Note: Bluetooth functionality uses subprocess to call system commands.
+# The following system packages are required (install via apt, not pip):
+#   pulseaudio
+#   pulseaudio-module-bluetooth
+#   bluez
+#   bluez-tools
+#   alsa-utils (for amixer volume control)
+#
+# Install system packages with:
+#   sudo apt-get update
+#   sudo apt-get install -y pulseaudio pulseaudio-module-bluetooth bluez bluez-tools alsa-utils
+#
+# Optional: dbus-python for advanced D-Bus integration (not required for basic functionality)
+# dbus-python==1.3.2
