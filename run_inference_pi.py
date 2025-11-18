@@ -26,6 +26,42 @@ import numpy as np
 import mediapipe as mp
 import joblib
 
+# ---------------- Picamera2 Capture (replaces GStreamer) ----------------
+class PiCamera2Capture:
+    def __init__(self, W=640, H=360):
+        self.W, self.H = W, H
+        self.picam2 = None
+        try:
+            from picamera2 import Picamera2
+            self.picam2 = Picamera2()
+            config = self.picam2.create_preview_configuration(
+                main={"format": 'XRGB8888', "size": (self.W, self.H)}
+            )
+            self.picam2.configure(config)
+            self.picam2.start()
+            print("[INFO] Picamera2 backend initialized successfully.")
+        except ImportError:
+            print("[WARN] Picamera2 library not found. Use 'pip install picamera2'.")
+            self.picam2 = None
+        except Exception as e:
+            print(f"[WARN] Failed to initialize Picamera2: {e}")
+            self.picam2 = None
+
+    def read(self):
+        if not self.isOpened():
+            return False, None
+        # Convert RGB frame from Picamera2 to BGR for OpenCV
+        frame = self.picam2.capture_array()
+        return True, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+    def release(self):
+        if self.picam2:
+            self.picam2.stop()
+
+    def isOpened(self):
+        return self.picam2 is not None and self.picam2.started
+
+
 # ---------------- Non-blocking command worker ----------------
 class CommandWorker(threading.Thread):
     def __init__(self, max_queue=64):
@@ -201,15 +237,12 @@ if __name__ == "__main__":
     # Load XGBoost backend only
     xgb = XGBBackend(args.models, window=W_meta)
 
-    # Camera + buffers (Pi-friendly: try libcamera via GStreamer, then fallback to /dev/video0)
-    print("[INFO] Attempting to open camera with GStreamer (for libcamera)...")
-    GST = (
-        "libcamerasrc ! video/x-raw,width=640,height=360,framerate=30/1 "
-        "! videoconvert ! appsink drop=true sync=false"
-    )
-    cap = cv2.VideoCapture(GST, cv2.CAP_GSTREAMER)
+    # Camera + buffers (Pi-friendly: try Picamera2 first, then fallback to /dev/video0)
+    print("[INFO] Attempting to open camera with Picamera2...")
+    cap = PiCamera2Capture(W=640, H=360)
+    
     if not cap.isOpened():
-        print("[WARN] GStreamer failed. Falling back to default camera index 0...")
+        print("[WARN] Picamera2 failed. Falling back to default camera index 0...")
         cap = cv2.VideoCapture(0)
         if cap.isOpened():
             print("[INFO] Successfully opened camera at index 0.")
@@ -219,7 +252,7 @@ if __name__ == "__main__":
     if not cap.isOpened():
         print("\n[ERROR] Could not open any camera. Please check your configuration.")
         print("    1. Is the camera enabled? Run 'sudo raspi-config' -> Interface Options -> CSI Camera -> Enable.")
-        print("    2. Is the camera detected? Run 'libcamera-hello --list-cameras' in your terminal.")
+        print("    2. Is the camera detected? Run 'libcamera-hello --list-cameras' or 'picamera2-hello' in your terminal.")
         print("    3. Is the ribbon cable connected correctly at both ends?")
         exit()
 

@@ -15,3 +15,8 @@ pandas==2.3.3
 
 # --- Optional (progress bars / convenience) ---
 tqdm==4.67.1
+
+# --- Raspberry Pi Camera specific ---
+# Note: Requires system packages to be installed first on Pi OS:
+# sudo apt update && sudo apt install -y python3-picamera2 libcamera-dev
+picamera2==0.3.12
