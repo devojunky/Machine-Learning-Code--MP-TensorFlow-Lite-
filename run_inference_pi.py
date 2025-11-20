@@ -294,6 +294,22 @@ def _alsa_nudge(db_delta):
         subprocess.run(["amixer", "set", "Master", f"{int(db_delta)}dB"], check=False)
     except Exception as e:
         print("[amixer]", e, file=sys.stderr)
+        
+def _pa_nudge(percent_delta):
+    """
+    Nudge the PulseAudio default sink volume.
+    percent_delta is like +5 or -5.
+    """
+    try:
+        subprocess.run(
+            ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{percent_delta:+d}%"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        print("[pactl]", e, file=sys.stderr)
+
 
 def async_next_track():        worker.submit(_bt_next)
 def async_prev_track():        worker.submit(_bt_prev)
@@ -301,15 +317,14 @@ def async_toggle_play_pause(): worker.submit(_bt_playpause)
 
 def async_nudge_vol(delta):
     """
-    Keep the original API (delta in arbitrary units). We map to AVRCP
-    up/down steps; uncomment ALSA fallback if phone volume doesn’t move.
+    delta > 0  -> volume up
+    delta <= 0 -> volume down
     """
+    step = 5  # % per gesture; tweak to taste
     if delta > 0:
-        worker.submit(_bt_vol_up)
-        # worker.submit(_alsa_nudge, +2)   # optional fallback
+        worker.submit(_pa_nudge, +step)
     else:
-        worker.submit(_bt_vol_down)
-        # worker.submit(_alsa_nudge, -2)   # optional fallback
+        worker.submit(_pa_nudge, -step)
 
 # ---------------- MediaPipe & features (match training) ----------------
 SEL = [0,1,2,3,4,5,9,13,17,6,8,10,12,14,16,18,20]
