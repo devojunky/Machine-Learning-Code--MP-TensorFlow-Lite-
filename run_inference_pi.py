@@ -210,26 +210,80 @@ def check_bluetooth_setup():
 # ---------------- Linux/BlueZ media controls (replaces macOS AppleScript) ----------------
 def _btctl(cmds):
     """
-    Send a small sequence of commands to bluetoothctl. Example cmds:
-      ["menu player", "play-pause", "back"]
-    Requires an active phone connection with a MediaPlayer.
+    Send a small sequence of commands to bluetoothctl.
+    Returns stdout (str) to allow status checking.
     """
     try:
-        subprocess.run(
+        res = subprocess.run(
             ["bluetoothctl"],
             input=("\n".join(cmds) + "\n").encode(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False
         )
+        return res.stdout.decode('utf-8', errors='ignore')
     except Exception as e:
         print("[bluetoothctl]", e, file=sys.stderr)
+        return ""
 
-def _bt_playpause(): _btctl(["menu player", "play-pause", "back"])
+def _get_connected_device_path():
+    """
+    Finds the first connected Bluetooth device to send AVRCP commands to.
+    Returns DBus path string (e.g., /org/bluez/hci0/dev_XX_XX...) or None.
+    """
+    try:
+        # Check for connected devices
+        out = _btctl(["devices Connected"])
+        for line in out.split('\n'):
+            if "Device" in line:
+                # Line format: "Device XX:XX:XX:XX:XX:XX Name"
+                parts = line.split()
+                if len(parts) >= 2:
+                    mac = parts[1].replace(":", "_")
+                    return f"/org/bluez/hci0/dev_{mac}"
+    except Exception:
+        pass
+    return None
+
+def _dbus_media_cmd(interface, command):
+    """
+    Sends a DBus command to the connected device.
+    interface: 'org.bluez.MediaControl1' (for Volume) or 'org.bluez.MediaPlayer1'
+    """
+    dev_path = _get_connected_device_path()
+    if not dev_path:
+        return
+    
+    cmd = [
+        "dbus-send", "--system", "--type=method_call",
+        f"--dest=org.bluez",
+        dev_path,
+        f"{interface}.{command}"
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        pass
+
+def _bt_playpause():
+    # Try 'play-pause' toggle first (works on some players)
+    # If that fails or isn't supported, we check status and explicitly Play/Pause
+    out = _btctl(["menu player", "show", "back"])
+    if "Status: playing" in out or "status: playing" in out:
+        _btctl(["menu player", "pause", "back"])
+    else:
+        _btctl(["menu player", "play", "back"])
+
 def _bt_next():      _btctl(["menu player", "next", "back"])
 def _bt_prev():      _btctl(["menu player", "previous", "back"])
-def _bt_vol_up():    _btctl(["menu player", "volumeup", "back"])
-def _bt_vol_down():  _btctl(["menu player", "volumedown", "back"])
+
+def _bt_vol_up():    
+    # Use DBus MediaControl1 for remote volume control (AVRCP)
+    _dbus_media_cmd("org.bluez.MediaControl1", "VolumeUp")
+
+def _bt_vol_down():  
+    # Use DBus MediaControl1 for remote volume control (AVRCP)
+    _dbus_media_cmd("org.bluez.MediaControl1", "VolumeDown")
 
 def _alsa_nudge(db_delta):
     """
